@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 Intel Corporation.
+ * Copyright (c) 2025, Suraj Sonawane <surajsonawane0215@gmail.com@gmail.com>
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -93,7 +93,7 @@ static int virtual_dai_trigger(const struct device *dev,
 	return 0;
 }
 
-static const struct dai_driver_api virtual_dai_api = {
+static DEVICE_API(dai, virtual_dai_api) = {
 	.probe = virtual_dai_probe,
 	.remove = virtual_dai_remove,
 	.config_set = virtual_dai_config_set,
@@ -102,9 +102,21 @@ static const struct dai_driver_api virtual_dai_api = {
 	.trigger = virtual_dai_trigger,
 };
 
-static struct virtual_dai_data virtual_dai_data_inst;
+static int virtual_dai_init(const struct device *dev)
+{
+	return 0;
+}
 
-DEVICE_DT_INST_DEFINE(0, NULL, NULL,
-			&virtual_dai_data_inst, NULL,
-			POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,
-			&virtual_dai_api);
+#define VIRTUAL_DAI_INIT(inst) \
+static struct virtual_dai_data_ virtual_dai_data_##inst = {					\
+	.cfg.type = DAI_VIRTUAL,						\
+	.cfg.dai_index = DT_INST_PROP_OR(inst, dai_index, 0),			\
+};										\
+\
+DEVICE_DT_INST_DEFINE(inst, \
+		      &virtual_dai_init, NULL, \
+		      &virtual_dai_data_##inst, NULL, \
+		      POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE, \
+		      &virtual_dai_api);
+
+DT_INST_FOREACH_STATUS_OKAY(VIRTUAL_DAI_INIT);

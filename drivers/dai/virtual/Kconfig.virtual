@@ -1,6 +1,6 @@
 # SOF Virtual DAI configuration options
 
-# Copyright (c) 2022 Intel Corporation
+# Copyright (c) 2025, Suraj Sonawane <surajsonawane0215@gmail.com@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 config DAI_VIRTUAL

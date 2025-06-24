@@ -122,6 +122,12 @@
 			status = "disabled";
 		};
 
+		virtual_dai0: dai@0 {
+			compatible = "sof,virtual-dai";
+			dai-index = <0>;
+			status = "okay";
+		};
+
 		iomuxc: iomuxc@30330000 {
 			compatible = "nxp,imx-iomuxc";
 			reg = <0x30330000 DT_SIZE_K(64)>;
