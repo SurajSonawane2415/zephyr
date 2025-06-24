@@ -10,7 +10,7 @@
 #include <zephyr/pm/device_runtime.h>
 #include <string.h>
 
-#define DT_DRV_COMPAT sof_virtual_dai
+#define DT_DRV_COMPAT virtual_dai
 LOG_MODULE_REGISTER(virtual_dai, CONFIG_DAI_LOG_LEVEL);
 
 struct virtual_dai_data {
