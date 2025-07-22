@@ -121,6 +121,12 @@
 			fifo-depth = <32>;
 			status = "disabled";
 		};
+		
+		virtual_dai14: dai {
+			compatible = "dai-virtual";
+			dai-index = <7>;
+			status = "disabled";
+		};
 
 		iomuxc: iomuxc@30330000 {
 			compatible = "nxp,imx-iomuxc";
