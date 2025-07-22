@@ -121,6 +121,12 @@
 			fifo-depth = <32>;
 			status = "disabled";
 		};
+		
+		virtual_dai14: dai {
+			compatible = "virtual_dai";
+			dai-index = <7>;
+			status = "disabled";
+		};
 
 		iomuxc: iomuxc@30330000 {
 			compatible = "nxp,imx-iomuxc";
@@ -154,6 +160,20 @@
 			interrupt-parent = <&clic>;
 			interrupts = <7 0 0>;
 			rdc = <0>;
+			status = "disabled";
+		};
+
+		emul_dma: dma@30e80000 {
+			compatible = "zephyr,dma-emul";
+			reg = <0x30e80000 DT_SIZE_K(64)>;
+			#dma-cells = <1>;
+			dma-channels = <4>;
+			dma-channel-mask = <0xf>;
+			dma-buf-addr-alignment = <4>;
+			dma-buf-size-alignment = <4>;
+			dma-copy-alignment = <4>;
+			stack-size = <1024>;
+			priority = <2>;
 			status = "disabled";
 		};
 	};

@@ -483,15 +483,66 @@ static int dma_emul_get_status(const struct device *dev, uint32_t channel,
 			       struct dma_status *status)
 {
 	LOG_DBG("%s()", __func__);
+	LOG_INF("dma_emul: dma_emul_get_status()");
+	// k_spinlock_key_t key;
+	// struct dma_emul_data *data = dev->data;
+	// const struct dma_emul_config *config = dev->config;
+	// enum dma_emul_channel_state state;
+	// int ret = 0;
 
-	return -ENOSYS;
+	// if (channel >= config->num_channels || status == NULL) {
+	//     return -EINVAL;
+	// }
+
+	// key = k_spin_lock(&data->lock);
+
+	// state = dma_emul_get_channel_state(dev, channel);
+
+	// /* Initialize status */
+	// status->free = (state == DMA_EMUL_CHANNEL_UNUSED);
+	// status->pending_length = 0;
+
+	// /* Calculate pending length if channel is active */
+	// if (state == DMA_EMUL_CHANNEL_STARTED || state == DMA_EMUL_CHANNEL_LOADED) {
+	//     struct dma_emul_xfer_desc *xfer = &config->xfer[channel];
+	    
+	//     if (xfer->config.dma_slot < config->num_requests) {
+	//         struct dma_block_config *block = 
+	//             &config->block[channel * config->num_requests + xfer->config.dma_slot];
+	        
+	//         if (block != NULL) {
+	//             status->pending_length = block->block_size;
+	//         }
+	//     }
+	// }
+
+	// k_spin_unlock(&data->lock, key);
+
+	// return ret;
+
+	return 0;
 }
 
 static int dma_emul_get_attribute(const struct device *dev, uint32_t type, uint32_t *value)
 {
+	LOG_INF("dma_emul: dma_emul_get_attribute()");
 	LOG_DBG("%s()", __func__);
 
-	return -ENOSYS;
+	switch (type) {
+	case DMA_ATTR_BUFFER_SIZE_ALIGNMENT:
+		*value = 4;
+		break;
+	case DMA_ATTR_BUFFER_ADDRESS_ALIGNMENT:
+		*value = 128; /* should be dcache_align */
+		break;
+	case DMA_ATTR_MAX_BLOCK_COUNT:
+		*value = 2;
+		break;
+	default:
+		LOG_ERR("invalid attribute type: %d", type);
+		return -EINVAL;
+	}
+	return 0;
 }
 
 static bool dma_emul_chan_filter(const struct device *dev, int channel, void *filter_param)
@@ -564,7 +615,7 @@ static int dma_emul_init(const struct device *dev)
 				? POPCOUNT(DT_INST_PROP_OR(_inst, dma_channel_mask, 0))            \
 				: 0)
 
-#define DMA_EMUL_INST_NUM_REQUESTS(_inst) DT_INST_PROP_OR(_inst, dma_requests, 1)
+#define DMA_EMUL_INST_NUM_REQUESTS(_inst) DT_INST_PROP_OR(_inst, dma_requests, 2)
 
 #define DEFINE_DMA_EMUL(_inst)                                                                     \
 	BUILD_ASSERT(DMA_EMUL_INST_HAS_PROP(_inst, dma_channel_mask) ||                            \
