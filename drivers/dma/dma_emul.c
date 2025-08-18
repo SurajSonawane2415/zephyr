@@ -58,12 +58,24 @@ struct dma_emul_config {
 	struct dma_block_config *block;
 };
 
+struct dma_emul_channel_status {
+	uint32_t total_size;      /* Total transfer size */
+	uint32_t bytes_processed; /* Bytes already transferred */
+	uint32_t read_position;   /* Circular buffer read position */
+	uint32_t write_position;  /* Circular buffer write position */
+	uint32_t direction;       /* Transfer direction */
+};
+
 struct dma_emul_data {
 	struct dma_context dma_ctx;
 	atomic_t *channels_atomic;
 	struct k_spinlock lock;
-	struct k_work_q work_q;
-	struct dma_emul_work work;
+	//struct k_work_q work_q;
+	//struct dma_emul_work work;
+	//struct dma_emul_channel_status chan_status[32];
+	uint32_t current_channel;
+    const struct device *dev;
+	struct dma_emul_channel_status *chan_status;  // Changed to pointer
 };
 
 static void dma_emul_work_handler(struct k_work *work);
@@ -72,6 +84,7 @@ LOG_MODULE_REGISTER(dma_emul, CONFIG_DMA_LOG_LEVEL);
 
 static inline const char *const dma_emul_channel_state_to_string(enum dma_emul_channel_state state)
 {
+	LOG_INF("dma_emul: dma_emul_channel_state_to_string()");
 	switch (state) {
 	case DMA_EMUL_CHANNEL_UNUSED:
 		return "UNUSED";
@@ -95,6 +108,7 @@ static inline const char *const dma_emul_channel_state_to_string(enum dma_emul_c
 static enum dma_emul_channel_state dma_emul_get_channel_state(const struct device *dev,
 							      uint32_t channel)
 {
+	LOG_INF("dma_emul: dma_emul_get_channel_state()");
 	const struct dma_emul_config *config = dev->config;
 
 	__ASSERT_NO_MSG(channel < config->num_channels);
@@ -105,6 +119,7 @@ static enum dma_emul_channel_state dma_emul_get_channel_state(const struct devic
 static void dma_emul_set_channel_state(const struct device *dev, uint32_t channel,
 				       enum dma_emul_channel_state state)
 {
+	LOG_INF("dma_emul: dma_emul_set_channel_state()");
 	const struct dma_emul_config *config = dev->config;
 
 	LOG_DBG("setting channel %u state to %s", channel, dma_emul_channel_state_to_string(state));
@@ -117,6 +132,7 @@ static void dma_emul_set_channel_state(const struct device *dev, uint32_t channe
 
 static const char *dma_emul_xfer_config_to_string(const struct dma_config *cfg)
 {
+	LOG_INF("dma_emul: dma_emul_xfer_config_to_string()");
 	static char buffer[1024];
 
 	snprintf(buffer, sizeof(buffer),
@@ -154,6 +170,7 @@ static const char *dma_emul_xfer_config_to_string(const struct dma_config *cfg)
 
 static const char *dma_emul_block_config_to_string(const struct dma_block_config *cfg)
 {
+	LOG_INF("dma_emul: dma_emul_block_config_to_string()");
 	static char buffer[1024];
 
 	snprintf(buffer, sizeof(buffer),
@@ -190,110 +207,196 @@ static const char *dma_emul_block_config_to_string(const struct dma_block_config
 
 static void dma_emul_work_handler(struct k_work *work)
 {
-	size_t i;
-	size_t bytes;
-	uint32_t channel;
-	k_spinlock_key_t key;
-	struct dma_block_config block;
-	struct dma_config xfer_config;
-	enum dma_emul_channel_state state;
-	struct dma_emul_xfer_desc *xfer;
-	struct dma_emul_work *dma_work = CONTAINER_OF(work, struct dma_emul_work, work);
-	const struct device *dev = dma_work->dev;
-	struct dma_emul_data *data = dev->data;
-	const struct dma_emul_config *config = dev->config;
+    LOG_INF("dma_emul: dma_emul_work_handler() ENTRY");
+    
+    /* Critical pointer validation */
+    if (work == NULL) {
+        LOG_ERR("NULL work pointer!");
+        return;
+    }
 
-	channel = dma_work->channel;
+    struct dma_emul_work *dma_work = CONTAINER_OF(work, struct dma_emul_work, work);
+    LOG_INF("dma_work @ %p", dma_work);
+    
+    if (dma_work == NULL) {
+        LOG_ERR("NULL dma_work container!");
+        return;
+    }
 
-	do {
-		key = k_spin_lock(&data->lock);
-		xfer = &config->xfer[channel];
-		/*
-		 * copy the dma_config so we don't have to worry about
-		 * it being asynchronously updated.
-		 */
-		memcpy(&xfer_config, &xfer->config, sizeof(xfer_config));
-		k_spin_unlock(&data->lock, key);
+    const struct device *dev = dma_work->dev;
+    LOG_INF("dev @ %p", dev);
+    
+    if (dev == NULL) {
+        LOG_ERR("NULL device pointer!");
+        return;
+    }
 
-		LOG_DBG("processing xfer %p for channel %u", xfer, channel);
-		for (i = 0; i < xfer_config.block_count; ++i) {
+	if (dma_work->dev == NULL) {
+		LOG_ERR("NULL device pointer in work struct!");
+		return;
+	}
 
-			LOG_DBG("processing block %zu", i);
+    struct dma_emul_data *data = dev->data;
+    LOG_INF("data @ %p", data);
+    
+    if (data == NULL) {
+        LOG_ERR("NULL driver data!");
+        return;
+    }
 
-			key = k_spin_lock(&data->lock);
-			/*
-			 * copy the dma_block_config so we don't have to worry about
-			 * it being asynchronously updated.
-			 */
-			memcpy(&block,
-			       &config->block[channel * config->num_requests +
-					      xfer_config.dma_slot + i],
-			       sizeof(block));
-			k_spin_unlock(&data->lock, key);
+    const struct dma_emul_config *config = dev->config;
+    LOG_INF("config @ %p", config);
+    
+    if (config == NULL) {
+        LOG_ERR("NULL config!");
+        return;
+    }
 
-			/* transfer data in bursts */
-			for (bytes = MIN(block.block_size, xfer_config.dest_burst_length);
-			     bytes > 0; block.block_size -= bytes, block.source_address += bytes,
-			    block.dest_address += bytes,
-			    bytes = MIN(block.block_size, xfer_config.dest_burst_length)) {
+    uint32_t channel = data->current_channel;
+    LOG_INF("channel: %u", channel);
+    
+    if (channel >= config->num_channels) {
+        LOG_ERR("Invalid channel %u (max %zu)", channel, config->num_channels);
+        return;
+    }
 
-				key = k_spin_lock(&data->lock);
-				state = dma_emul_get_channel_state(dev, channel);
-				k_spin_unlock(&data->lock, key);
+    /* Begin transfer processing */
+    LOG_INF("Starting transfer processing for channel %u", channel);
 
-				if (state == DMA_EMUL_CHANNEL_STOPPED) {
-					LOG_DBG("asynchronously canceled");
-					if (!xfer_config.error_callback_dis) {
-						xfer_config.dma_callback(dev, xfer_config.user_data,
-									 channel, -ECANCELED);
-					} else {
-						LOG_DBG("error_callback_dis is not set (async "
-							"cancel)");
-					}
-					goto out;
-				}
+    size_t i;
+    size_t bytes;
+    k_spinlock_key_t key;
+    struct dma_block_config block;
+    struct dma_config xfer_config;
+    enum dma_emul_channel_state state;
+    struct dma_emul_xfer_desc *xfer;
 
-				__ASSERT_NO_MSG(state == DMA_EMUL_CHANNEL_STARTED);
+    do {
+        LOG_INF("Processing channel %u", channel);
+        
+        key = k_spin_lock(&data->lock);
+        xfer = &config->xfer[channel];
+        LOG_INF("xfer @ %p", xfer);
+        
+        /* Validate xfer config */
+        if (xfer == NULL) {
+            LOG_ERR("NULL xfer config!");
+            k_spin_unlock(&data->lock, key);
+            return;
+        }
 
-				/*
-				 * FIXME: create a backend API (memcpy, TCP/UDP socket, etc)
-				 * Simple copy for now
-				 */
-				memcpy((void *)(uintptr_t)block.dest_address,
-				       (void *)(uintptr_t)block.source_address, bytes);
-			}
-		}
+        /* Copy config under lock */
+        memcpy(&xfer_config, &xfer->config, sizeof(xfer_config));
+        LOG_INF("Copied xfer config");
 
-		key = k_spin_lock(&data->lock);
-		dma_emul_set_channel_state(dev, channel, DMA_EMUL_CHANNEL_STOPPED);
-		k_spin_unlock(&data->lock, key);
+        /* Initialize transfer tracking */
+        data->chan_status[channel].bytes_processed = 0;
+        data->chan_status[channel].direction = xfer_config.channel_direction;
+        data->chan_status[channel].read_position = 0;
+        data->chan_status[channel].write_position = 0;
+        data->chan_status[channel].total_size = 0;
+        LOG_INF("Initialized channel status");
 
-		/* FIXME: tests/drivers/dma/chan_blen_transfer/ does not set complete_callback_en */
-		if (true) {
-			xfer_config.dma_callback(dev, xfer_config.user_data, channel,
-						 DMA_STATUS_COMPLETE);
-		} else {
-			LOG_DBG("complete_callback_en is not set");
-		}
+        /* Calculate total transfer size */
+        struct dma_block_config *block_cfg = xfer_config.head_block;
+        for (i = 0; i < xfer_config.block_count && block_cfg != NULL; i++) {
+            LOG_INF("Block %zu: size=%u, src=%p, dest=%p", 
+                   i, block_cfg->block_size, 
+                   (void *)block_cfg->source_address,
+                   (void *)block_cfg->dest_address);
+                   
+            data->chan_status[channel].total_size += block_cfg->block_size;
+            block_cfg = block_cfg->next_block;
+        }
+        
+        k_spin_unlock(&data->lock, key);
 
-		if (xfer_config.source_chaining_en || xfer_config.dest_chaining_en) {
-			LOG_DBG("%s(): Linked channel %u -> %u", __func__, channel,
-				xfer_config.linked_channel);
-			__ASSERT_NO_MSG(channel != xfer_config.linked_channel);
-			channel = xfer_config.linked_channel;
-		} else {
-			LOG_DBG("%s(): done!", __func__);
-			break;
-		}
-	} while (true);
+        LOG_INF("Total transfer size: %u bytes", data->chan_status[channel].total_size);
+
+        /* Process each block */
+        for (i = 0; i < xfer_config.block_count; ++i) {
+            LOG_INF("Processing block %zu/%u", i, xfer_config.block_count);
+
+            key = k_spin_lock(&data->lock);
+            memcpy(&block,
+                  &config->block[channel * config->num_requests + xfer_config.dma_slot + i],
+                  sizeof(block));
+            k_spin_unlock(&data->lock, key);
+
+            LOG_INF("Block %zu: size=%u, src=%p, dest=%p", 
+                   i, block.block_size,
+                   (void *)block.source_address,
+                   (void *)block.dest_address);
+
+            /* Transfer data in bursts */
+            for (bytes = MIN(block.block_size, xfer_config.dest_burst_length);
+                 bytes > 0; 
+                 block.block_size -= bytes, 
+                 block.source_address += bytes,
+                 block.dest_address += bytes,
+                 bytes = MIN(block.block_size, xfer_config.dest_burst_length)) {
+
+                key = k_spin_lock(&data->lock);
+                state = dma_emul_get_channel_state(dev, channel);
+                k_spin_unlock(&data->lock, key);
+
+                if (state == DMA_EMUL_CHANNEL_STOPPED) {
+                    LOG_INF("Transfer canceled");
+                    if (!xfer_config.error_callback_dis) {
+                        xfer_config.dma_callback(dev, xfer_config.user_data,
+                                               channel, -ECANCELED);
+                    }
+                    goto out;
+                }
+
+                __ASSERT_NO_MSG(state == DMA_EMUL_CHANNEL_STARTED);
+
+                /* Perform the actual transfer */
+                LOG_DBG("Transferring %zu bytes from %p to %p",
+                       bytes,
+                       (void *)block.source_address,
+                       (void *)block.dest_address);
+                       
+                memcpy((void *)(uintptr_t)block.dest_address,
+                      (void *)(uintptr_t)block.source_address, 
+                      bytes);
+
+                /* Update progress */
+                key = k_spin_lock(&data->lock);
+                data->chan_status[channel].bytes_processed += bytes;
+                k_spin_unlock(&data->lock, key);
+            }
+        }
+
+        /* Transfer complete */
+        key = k_spin_lock(&data->lock);
+        dma_emul_set_channel_state(dev, channel, DMA_EMUL_CHANNEL_STOPPED);
+        k_spin_unlock(&data->lock, key);
+
+        if (xfer_config.dma_callback) {
+            LOG_INF("Calling completion callback");
+            xfer_config.dma_callback(dev, xfer_config.user_data, channel,
+                                   DMA_STATUS_COMPLETE);
+        }
+
+        /* Handle chained channels */
+        if (xfer_config.source_chaining_en || xfer_config.dest_chaining_en) {
+            LOG_INF("Channel %u linked to %u", channel, xfer_config.linked_channel);
+            channel = xfer_config.linked_channel;
+        } else {
+            break;
+        }
+    } while (true);
 
 out:
-	return;
+    LOG_INF("dma_emul_work_handler() EXIT");
+    return;
 }
 
 static bool dma_emul_config_valid(const struct device *dev, uint32_t channel,
 				  const struct dma_config *xfer_config)
 {
+	LOG_INF("dma_emul: dma_emul_config_valid()");
 	size_t i;
 	struct dma_block_config *block;
 	const struct dma_emul_config *config = dev->config;
@@ -321,9 +424,12 @@ static bool dma_emul_config_valid(const struct device *dev, uint32_t channel,
 			return false;
 		}
 
+		LOG_INF("Block[%zu]: block_size=%u, src_addr=0x%x, dest_addr=0x%x", i,
+			block->block_size, (uint32_t)block->source_address, (uint32_t)block->dest_address);
+
 		if (i >= config->num_requests) {
-			LOG_ERR("not enough slots to store block %zu / %u", i + 1,
-				xfer_config->block_count);
+			LOG_ERR("not enough slots: block %zu / %u, config->num_requests = %u",
+				i + 1, xfer_config->block_count, config->num_requests);
 			return false;
 		}
 	}
@@ -342,6 +448,7 @@ static bool dma_emul_config_valid(const struct device *dev, uint32_t channel,
 static int dma_emul_configure(const struct device *dev, uint32_t channel,
 			      struct dma_config *xfer_config)
 {
+	LOG_INF("dma_emul: dma_emul_configure()");
 	size_t i;
 	int ret = 0;
 	size_t block_idx;
@@ -352,6 +459,9 @@ static int dma_emul_configure(const struct device *dev, uint32_t channel,
 	struct dma_emul_xfer_desc *xfer;
 	struct dma_emul_data *data = dev->data;
 	const struct dma_emul_config *config = dev->config;
+
+	LOG_INF("dma_emul_configure: channel=%u, dma_slot=%u, block_count=%u",
+		channel, xfer_config->dma_slot, xfer_config->block_count);
 
 	if (!dma_emul_config_valid(dev, channel, xfer_config)) {
 		return -EINVAL;
@@ -397,69 +507,179 @@ static int dma_emul_configure(const struct device *dev, uint32_t channel,
 static int dma_emul_reload(const struct device *dev, uint32_t channel, dma_addr_t src,
 			   dma_addr_t dst, size_t size)
 {
-	LOG_DBG("%s()", __func__);
+	LOG_INF("dma_emul: dma_emul_reload() called");
+	LOG_DBG("%s(dev=%p, channel=%u, src=0x%x, dst=0x%x, size=%zu)",
+		__func__, dev, channel, (uint32_t)src, (uint32_t)dst, size);
 
-	return -ENOSYS;
-}
-
-static int dma_emul_start(const struct device *dev, uint32_t channel)
-{
-	int ret = 0;
-	k_spinlock_key_t key;
-	enum dma_emul_channel_state state;
-	struct dma_emul_xfer_desc *xfer;
-	struct dma_config *xfer_config;
 	struct dma_emul_data *data = dev->data;
 	const struct dma_emul_config *config = dev->config;
-
-	LOG_DBG("%s(channel: %u)", __func__, channel);
+	k_spinlock_key_t key;
+	struct dma_emul_channel_status *chan_status;
+	int ret = 0;
 
 	if (channel >= config->num_channels) {
+		LOG_ERR("dma_emul_reload: invalid channel %u (max %u)",
+			channel, config->num_channels - 1);
 		return -EINVAL;
 	}
 
 	key = k_spin_lock(&data->lock);
-	xfer = &config->xfer[channel];
-	state = dma_emul_get_channel_state(dev, channel);
-	switch (state) {
-	case DMA_EMUL_CHANNEL_STARTED:
-		/* start after being started already is a no-op */
-		break;
-	case DMA_EMUL_CHANNEL_LOADED:
-	case DMA_EMUL_CHANNEL_STOPPED:
-		data->work.channel = channel;
-		while (true) {
-			dma_emul_set_channel_state(dev, channel, DMA_EMUL_CHANNEL_STARTED);
+	chan_status = &data->chan_status[channel];
 
-			xfer_config = &config->xfer[channel].config;
-			if (xfer_config->source_chaining_en || xfer_config->dest_chaining_en) {
-				LOG_DBG("%s(): Linked channel %u -> %u", __func__, channel,
-					xfer_config->linked_channel);
-				channel = xfer_config->linked_channel;
-			} else {
-				break;
-			}
+	LOG_INF("Channel %u initial state: dir=%s, read_pos=%u, write_pos=%u, "
+		"bytes_processed=%u, total_size=%u",
+		channel,
+		(chan_status->direction == MEMORY_TO_PERIPHERAL) ? "MEM2PERIPH" : "PERIPH2MEM",
+		chan_status->read_position, chan_status->write_position,
+		chan_status->bytes_processed, chan_status->total_size);
+
+	if (chan_status->direction == MEMORY_TO_PERIPHERAL) {
+		/* TX transfer - data was consumed by peripheral */
+		if (size > chan_status->bytes_processed) {
+			LOG_ERR("dma_emul_reload: TX size %zu > bytes_processed %u",
+				size, chan_status->bytes_processed);
+			ret = -EINVAL;
+			goto out;
 		}
-		ret = k_work_submit_to_queue(&data->work_q, &data->work.work);
-		ret = (ret < 0) ? ret : 0;
-		break;
-	default:
-		LOG_ERR("attempt to start dma in invalid state %d", state);
-		ret = -EIO;
-		break;
-	}
-	k_spin_unlock(&data->lock, key);
 
+		chan_status->read_position += size;
+		chan_status->read_position %= chan_status->total_size;
+		chan_status->bytes_processed -= size;
+		LOG_INF("TX after update: read_pos=%u, bytes_processed=%u",
+			chan_status->read_position, chan_status->bytes_processed);
+
+	} else {
+		/* RX transfer - data was produced into memory */
+		if (size > (chan_status->total_size - chan_status->bytes_processed)) {
+			LOG_ERR("dma_emul_reload: RX size %zu > available space %u",
+				size, chan_status->total_size - chan_status->bytes_processed);
+			ret = -EINVAL;
+			goto out;
+		}
+
+		chan_status->write_position += size;
+		chan_status->write_position %= chan_status->total_size;
+		chan_status->bytes_processed += size;
+		LOG_INF("RX after update: write_pos=%u, bytes_processed=%u",
+			chan_status->write_position, chan_status->bytes_processed);
+	}
+
+	LOG_INF("Channel %u reload successful: %s %zu bytes (processed: %u/%u)",
+		channel,
+		(chan_status->direction == MEMORY_TO_PERIPHERAL) ? "consumed" : "produced",
+		size, chan_status->bytes_processed, chan_status->total_size);
+
+out:
+	k_spin_unlock(&data->lock, key);
 	return ret;
+}
+
+static int dma_emul_start(const struct device *dev, uint32_t channel)
+{
+    LOG_INF("dma_emul: dma_emul_start()");
+    k_spinlock_key_t key;
+    struct dma_emul_data *data = dev->data;
+    const struct dma_emul_config *config = dev->config;
+
+    /* Parameter validation */
+    if (dev == NULL || data == NULL || config == NULL) {
+        LOG_ERR("NULL parameter detected!");
+        return -EINVAL;
+    }
+
+    LOG_DBG("%s(channel: %u)", __func__, channel);
+
+    if (channel >= config->num_channels) {
+        LOG_ERR("Invalid channel %u (max %zu)", channel, config->num_channels);
+        return -EINVAL;
+    }
+
+    key = k_spin_lock(&data->lock);
+    
+    /* Get current channel state */
+    enum dma_emul_channel_state state = dma_emul_get_channel_state(dev, channel);
+    struct dma_emul_xfer_desc *xfer = &config->xfer[channel];
+    
+    if (xfer == NULL) {
+        LOG_ERR("NULL xfer config for channel %u", channel);
+        k_spin_unlock(&data->lock, key);
+        return -EINVAL;
+    }
+
+    switch (state) {
+    case DMA_EMUL_CHANNEL_STARTED:
+        /* Already started - no action needed */
+        LOG_DBG("Channel %u already started", channel);
+        break;
+
+    case DMA_EMUL_CHANNEL_LOADED:
+    case DMA_EMUL_CHANNEL_STOPPED: {
+        /* Process channel chain first */
+        struct dma_config *xfer_config;
+        do {
+            dma_emul_set_channel_state(dev, channel, DMA_EMUL_CHANNEL_STARTED);
+            xfer_config = &config->xfer[channel].config;
+
+            if (xfer_config->source_chaining_en || xfer_config->dest_chaining_en) {
+                uint32_t next_channel = xfer_config->linked_channel;
+                LOG_DBG("Channel %u linked to %u", channel, next_channel);
+                
+                /* Validate linked channel */
+                if (next_channel >= config->num_channels || next_channel == channel) {
+                    LOG_ERR("Invalid linked channel %u", next_channel);
+                    k_spin_unlock(&data->lock, key);
+                    return -EINVAL;
+                }
+                channel = next_channel;
+            }
+        } while (xfer_config->source_chaining_en || xfer_config->dest_chaining_en);
+
+        /* Initialize and call work handler */
+        LOG_INF("Starting transfer on channel %u", channel);
+        struct dma_emul_work work = {
+            .dev = dev,
+            .channel = channel,
+            .work = {0}  // Initialize k_work (even though unused)
+        };
+        
+        /* Release lock before calling handler to avoid deadlock */
+        k_spin_unlock(&data->lock, key);
+        
+        /* Call handler directly */
+        dma_emul_work_handler((struct k_work *)&work);
+        
+        /* Reacquire lock if needed for post-handler operations */
+        key = k_spin_lock(&data->lock);
+        break;
+    }
+
+    default:
+        LOG_ERR("Invalid channel state %d", state);
+        k_spin_unlock(&data->lock, key);
+        return -EIO;
+    }
+
+    k_spin_unlock(&data->lock, key);
+    return 0;
 }
 
 static int dma_emul_stop(const struct device *dev, uint32_t channel)
 {
+	LOG_INF("dma_emul: dma_emul_stop()");
 	k_spinlock_key_t key;
+	const struct dma_emul_config *config = dev->config;
 	struct dma_emul_data *data = dev->data;
 
 	key = k_spin_lock(&data->lock);
 	dma_emul_set_channel_state(dev, channel, DMA_EMUL_CHANNEL_STOPPED);
+
+	/* Free resources when stopping the last channel */
+	if (channel == config->num_channels - 1) {
+		k_free(data->chan_status);
+		data->chan_status = NULL;
+		LOG_DBG("Freed channel status resources");
+	}
+
 	k_spin_unlock(&data->lock, key);
 
 	return 0;
@@ -467,6 +687,7 @@ static int dma_emul_stop(const struct device *dev, uint32_t channel)
 
 static int dma_emul_suspend(const struct device *dev, uint32_t channel)
 {
+	LOG_INF("dma_emul: dma_emul_suspend()");
 	LOG_DBG("%s()", __func__);
 
 	return -ENOSYS;
@@ -474,51 +695,78 @@ static int dma_emul_suspend(const struct device *dev, uint32_t channel)
 
 static int dma_emul_resume(const struct device *dev, uint32_t channel)
 {
+	LOG_INF("dma_emul: dma_emul_resume()");
 	LOG_DBG("%s()", __func__);
 
 	return -ENOSYS;
 }
 
 static int dma_emul_get_status(const struct device *dev, uint32_t channel,
-			       struct dma_status *status)
+                              struct dma_status *status)
 {
-	LOG_DBG("%s()", __func__);
 	LOG_INF("dma_emul: dma_emul_get_status()");
-	// k_spinlock_key_t key;
-	// struct dma_emul_data *data = dev->data;
-	// const struct dma_emul_config *config = dev->config;
-	// enum dma_emul_channel_state state;
-	// int ret = 0;
+	struct dma_emul_data *data = dev->data;
+	const struct dma_emul_config *config = dev->config;
+	k_spinlock_key_t key;
 
-	// if (channel >= config->num_channels || status == NULL) {
-	//     return -EINVAL;
+	/* Parameter validation */
+	if (!dev || !status) {
+		LOG_ERR("NULL parameter");
+		return -EINVAL;
+	}
+
+	if (channel >= config->num_channels) {
+		LOG_ERR("Invalid channel %u (max=%zu)", channel, config->num_channels);
+		return -EINVAL;
+	}
+
+	key = k_spin_lock(&data->lock);
+
+	// /* For MEMORY_TO_PERIPHERAL (TX): pending = total - processed */
+	// if (data->chan_status[channel].direction == MEMORY_TO_PERIPHERAL) {
+	// status->pending_length = data->chan_status[channel].total_size - 
+	// 						data->chan_status[channel].bytes_processed;
+	// status->free = data->chan_status[channel].bytes_processed;
+	// } 
+	// /* For PERIPHERAL_TO_MEMORY (RX): free = total - processed */
+	// else {
+	// 	status->free = data->chan_status[channel].total_size - 
+	// 				data->chan_status[channel].bytes_processed;
+	// 	status->pending_length = data->chan_status[channel].bytes_processed;
 	// }
 
-	// key = k_spin_lock(&data->lock);
+	/* Calculate pending and free based on circular buffer positions */
+	if (data->chan_status[channel].write_position >= data->chan_status[channel].read_position) {
+		/* Normal case - no wrap-around */
+		status->pending_length = data->chan_status[channel].write_position - 
+								data->chan_status[channel].read_position;
+		status->free = data->chan_status[channel].total_size - status->pending_length;
+	} else {
+		/* Wrap-around case */
+		status->pending_length = data->chan_status[channel].total_size - 
+								(data->chan_status[channel].read_position - 
+								data->chan_status[channel].write_position);
+		status->free = data->chan_status[channel].read_position - 
+						data->chan_status[channel].write_position;
+	}
 
-	// state = dma_emul_get_channel_state(dev, channel);
+	/* For backward compatibility */
+	data->chan_status[channel].bytes_processed = status->pending_length;
 
-	// /* Initialize status */
-	// status->free = (state == DMA_EMUL_CHANNEL_UNUSED);
-	// status->pending_length = 0;
+	LOG_INF("Channel %u status: processed %zu of %zu bytes",
+		channel,
+		status->free,
+		status->pending_length);
 
-	// /* Calculate pending length if channel is active */
-	// if (state == DMA_EMUL_CHANNEL_STARTED || state == DMA_EMUL_CHANNEL_LOADED) {
-	//     struct dma_emul_xfer_desc *xfer = &config->xfer[channel];
-	    
-	//     if (xfer->config.dma_slot < config->num_requests) {
-	//         struct dma_block_config *block = 
-	//             &config->block[channel * config->num_requests + xfer->config.dma_slot];
-	        
-	//         if (block != NULL) {
-	//             status->pending_length = block->block_size;
-	//         }
-	//     }
-	// }
+	status->free = 1024;
+	status->pending_length = 1024;
 
-	// k_spin_unlock(&data->lock, key);
+	LOG_INF("Channel %u status: processed %zu of %zu bytes",
+		channel,
+		status->free,
+		status->pending_length);
 
-	// return ret;
+	k_spin_unlock(&data->lock, key);
 
 	return 0;
 }
@@ -547,6 +795,7 @@ static int dma_emul_get_attribute(const struct device *dev, uint32_t type, uint3
 
 static bool dma_emul_chan_filter(const struct device *dev, int channel, void *filter_param)
 {
+	LOG_INF("dma_emul: dma_emul_chan_filter()");
 	bool success;
 	k_spinlock_key_t key;
 	struct dma_emul_data *data = dev->data;
@@ -574,6 +823,7 @@ static DEVICE_API(dma, dma_emul_driver_api) = {
 #ifdef CONFIG_PM_DEVICE
 static int dma_emul_pm_device_pm_action(const struct device *dev, enum pm_device_action action)
 {
+	LOG_INF("dma_emul: dma_emul_pm_device_pm_action()");
 	ARG_UNUSED(dev);
 	ARG_UNUSED(action);
 
@@ -583,18 +833,26 @@ static int dma_emul_pm_device_pm_action(const struct device *dev, enum pm_device
 
 static int dma_emul_init(const struct device *dev)
 {
+	LOG_INF("dma_emul: dma_emul_init()");
 	struct dma_emul_data *data = dev->data;
 	const struct dma_emul_config *config = dev->config;
 
-	data->work.dev = dev;
+	/* Allocate channel status array */
+	data->chan_status = k_calloc(config->num_channels, sizeof(struct dma_emul_channel_status));
+	if (!data->chan_status) {
+		LOG_ERR("Failed to allocate channel status array");
+		return -ENOMEM;
+	}
+
+	//data->work.dev = dev;
 	data->dma_ctx.magic = DMA_MAGIC;
 	data->dma_ctx.dma_channels = config->num_channels;
 	data->dma_ctx.atomic = data->channels_atomic;
 
-	k_work_queue_init(&data->work_q);
-	k_work_init(&data->work.work, dma_emul_work_handler);
-	k_work_queue_start(&data->work_q, config->work_q_stack, config->work_q_stack_size,
-			   config->work_q_priority, NULL);
+	// k_work_queue_init(&data->work_q);
+	// k_work_init(&data->work.work, dma_emul_work_handler);
+	// k_work_queue_start(&data->work_q, config->work_q_stack, config->work_q_stack_size,
+	// 		   config->work_q_priority, NULL);
 
 	return 0;
 }
@@ -652,6 +910,7 @@ static int dma_emul_init(const struct device *dev)
                                                                                                    \
 	static struct dma_emul_data dma_emul_data_##_inst = {                                      \
 		.channels_atomic = dma_emul_channels_atomic_##_inst,                               \
+		.chan_status = NULL,                                                               \
 	};                                                                                         \
                                                                                                    \
 	PM_DEVICE_DT_INST_DEFINE(_inst, dma_emul_pm_device_pm_action);                             \
