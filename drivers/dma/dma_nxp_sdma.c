@@ -10,6 +10,11 @@
 #include <zephyr/logging/log.h>
 #include "fsl_sdma.h"
 
+#include <zephyr/debug/dlog_zephyr.h> //get logs
+
+volatile uint32_t dlog_data[ZDLOG_MAX];
+volatile uint32_t dlog_index = 0;
+
 LOG_MODULE_REGISTER(nxp_sdma);
 
 #define DMA_NXP_SDMA_BD_COUNT 2
@@ -53,6 +58,7 @@ struct sdma_dev_data {
 
 static int dma_nxp_sdma_init_stat(struct sdma_channel_data *chan_data)
 {
+	ZDLOG(DNSIS);
 	chan_data->stat.read_position = 0;
 	chan_data->stat.write_position = 0;
 
@@ -71,11 +77,18 @@ static int dma_nxp_sdma_init_stat(struct sdma_channel_data *chan_data)
 		return -EINVAL;
 	}
 
+	LOG_INF("Ch%d init: capacity=%u, pending=%u, free=%u",
+		chan_data->index,
+		chan_data->capacity,
+		chan_data->stat.pending_length,
+		chan_data->stat.free);
+
 	return 0;
 }
 
 static int dma_nxp_sdma_consume(struct sdma_channel_data *chan_data, uint32_t bytes)
 {
+	ZDLOG(DNSC);
 	if (bytes > chan_data->stat.pending_length)
 		return -EINVAL;
 
@@ -97,6 +110,7 @@ static int dma_nxp_sdma_consume(struct sdma_channel_data *chan_data, uint32_t by
 
 static int dma_nxp_sdma_produce(struct sdma_channel_data *chan_data, uint32_t bytes)
 {
+	ZDLOG(DNSP);
 	if (bytes > chan_data->stat.free)
 		return -EINVAL;
 
@@ -118,34 +132,13 @@ static int dma_nxp_sdma_produce(struct sdma_channel_data *chan_data, uint32_t by
 
 static void dma_nxp_sdma_isr(const void *data)
 {
-	uint32_t val;
-	uint32_t i = 1;
-	struct sdma_channel_data *chan_data;
-	struct device *dev = (struct device *)data;
-	struct sdma_dev_data *dev_data = dev->data;
-	const struct sdma_dev_cfg *dev_cfg = dev->config;
-
-	/* Clear channel 0 */
-	SDMA_ClearChannelInterruptStatus(dev_cfg->base, 1U);
-
-	/* Ignore channel 0, is used only for download */
-	val = SDMA_GetChannelInterruptStatus(dev_cfg->base) >> 1U;
-	while (val) {
-		if ((val & 0x1) != 0) {
-			chan_data = &dev_data->chan[i];
-			SDMA_ClearChannelInterruptStatus(dev_cfg->base, 1 << i);
-			SDMA_HandleIRQ(&chan_data->handle);
-
-			if (chan_data->cb)
-				chan_data->cb(chan_data->dev, chan_data->arg, i, DMA_STATUS_BLOCK);
-		}
-		i++;
-		val >>= 1;
-	}
+	ZDLOG(DNDI);
+	LOG_INF("DMA ISR: Simulated interrupt");
 }
 
 void sdma_set_transfer_type(struct dma_config *config, sdma_transfer_type_t *type)
 {
+	ZDLOG(DSTT);
 	switch (config->channel_direction) {
 	case MEMORY_TO_MEMORY:
 		*type = kSDMA_MemoryToMemory;
@@ -169,30 +162,56 @@ void sdma_set_transfer_type(struct dma_config *config, sdma_transfer_type_t *typ
 
 int sdma_set_peripheral_type(struct dma_config *config, sdma_peripheral_t *type)
 {
+	ZDLOG(DSPT);
+	
+	/* For dummy DMA, accept any value or default to a safe value */
+	if (config->dma_slot == 0) {
+		/* Use a default peripheral type for dummy operation */
+		*type = kSDMA_PeripheralNormal_SP;
+		LOG_INF("Using default peripheral type for dma_slot=0");
+		return 0;
+	}
+	
 	switch (config->dma_slot) {
 	case kSDMA_PeripheralNormal_SP:
 	case kSDMA_PeripheralMultiFifoPDM:
 		*type = config->dma_slot;
 		break;
 	default:
+		LOG_ERR("Unsupported dma_slot: %d", config->dma_slot);
 		return -EINVAL;
 	}
 
 	return 0;
 }
 
+
+/* Modify the callback to log data instead of using SDMA */
 void dma_nxp_sdma_callback(sdma_handle_t *handle, void *userData, bool TransferDone,
 			   uint32_t bdIndex)
 {
-	const struct sdma_dev_cfg *dev_cfg;
 	struct sdma_channel_data *chan_data = userData;
-	sdma_buffer_descriptor_t *bd;
-	int xfer_size;
+	int xfer_size = chan_data->capacity / chan_data->bd_count;
 
-	dev_cfg = chan_data->dev->config;
+	LOG_INF("DMA CB: Channel %d, BD %d, Size %d bytes, Dir %s", 
+		chan_data->index, bdIndex, xfer_size,
+		chan_data->direction == MEMORY_TO_PERIPHERAL ? "MEM->PERIPH" : "PERIPH->MEM");
 
-	xfer_size = chan_data->capacity / chan_data->bd_count;
+	/* Log the data being transferred (first few bytes for demo) */
+	if (chan_data->dma_cfg && chan_data->dma_cfg->head_block) {
+		struct dma_block_config *blk = chan_data->dma_cfg->head_block;
+		uint8_t *src = (uint8_t *)blk->source_address;
+		
+		LOG_INF("  Src: 0x%08x, Dest: 0x%08x", 
+			blk->source_address, blk->dest_address);
+		
+		/* Log first 16 bytes of data */
+		LOG_INF("  Data: %02x %02x %02x %02x %02x %02x %02x %02x ...",
+			src[0], src[1], src[2], src[3], 
+			src[4], src[5], src[6], src[7]);
+	}
 
+	/* Update statistics (simulate hardware) */
 	switch (chan_data->direction) {
 	case MEMORY_TO_PERIPHERAL:
 		dma_nxp_sdma_consume(chan_data, xfer_size);
@@ -204,16 +223,15 @@ void dma_nxp_sdma_callback(sdma_handle_t *handle, void *userData, bool TransferD
 		break;
 	}
 
-	/* prepare next BD for transfer */
-	bd = &chan_data->bd_pool[bdIndex];
-	bd->count = xfer_size;
-	bd->status |= (uint8_t)kSDMA_BDStatusDone;
-
-	SDMA_StartChannelSoftware(dev_cfg->base, chan_data->index);
+	/* Simulate completion - call user callback */
+	if (chan_data->cb && TransferDone) {
+		chan_data->cb(chan_data->dev, chan_data->arg, chan_data->index, DMA_STATUS_BLOCK);
+	}
 }
 
 static int dma_nxp_sdma_channel_init(const struct device *dev, uint32_t channel)
 {
+	ZDLOG(DNSCI);
 	const struct sdma_dev_cfg *dev_cfg = dev->config;
 	struct sdma_dev_data *dev_data = dev->data;
 	struct sdma_channel_data *chan_data;
@@ -229,6 +247,7 @@ static int dma_nxp_sdma_channel_init(const struct device *dev, uint32_t channel)
 static void dma_nxp_sdma_setup_bd(const struct device *dev, uint32_t channel,
 				struct dma_config *config)
 {
+	ZDLOG(DNSSH);
 	struct sdma_dev_data *dev_data = dev->data;
 	struct sdma_channel_data *chan_data;
 	sdma_buffer_descriptor_t *crt_bd;
@@ -272,6 +291,7 @@ static void dma_nxp_sdma_setup_bd(const struct device *dev, uint32_t channel,
 static int dma_nxp_sdma_config(const struct device *dev, uint32_t channel,
 			       struct dma_config *config)
 {
+	ZDLOG(DNSC);
 	const struct sdma_dev_cfg *dev_cfg = dev->config;
 	struct sdma_dev_data *dev_data = dev->data;
 	struct sdma_channel_data *chan_data;
@@ -300,45 +320,50 @@ static int dma_nxp_sdma_config(const struct device *dev, uint32_t channel,
 		return ret;
 	}
 
-	if (chan_data->peripheral == kSDMA_PeripheralMultiFifoPDM) {
-		unsigned int n_fifos = 4; /* TODO: make this configurable */
+		if (chan_data->peripheral == kSDMA_PeripheralMultiFifoPDM) {
+			unsigned int n_fifos = 4; /* TODO: make this configurable */
 
-		SDMA_SetMultiFifoConfig(&chan_data->transfer_cfg, n_fifos, 0);
-		SDMA_EnableSwDone(dev_cfg->base, &chan_data->transfer_cfg, 0,
-				  chan_data->peripheral);
-	}
+			SDMA_SetMultiFifoConfig(&chan_data->transfer_cfg, n_fifos, 0);
+			SDMA_EnableSwDone(dev_cfg->base, &chan_data->transfer_cfg, 0,
+					  chan_data->peripheral);
+		}
 
-	dma_nxp_sdma_setup_bd(dev, channel, config);
-	ret = dma_nxp_sdma_init_stat(chan_data);
-	if (ret < 0) {
-		LOG_ERR("%s: failed to init stat", __func__);
-		return ret;
-	}
+		dma_nxp_sdma_setup_bd(dev, channel, config);
+		ret = dma_nxp_sdma_init_stat(chan_data);
+		if (ret < 0) {
+			LOG_ERR("%s: failed to init stat", __func__);
+			return ret;
+		}
 
 	block_cfg = config->head_block;
 
+	chan_data->dma_cfg = config;
+	
+	LOG_INF("DMA CONFIG: Channel %d, Dir %d, Block Count %d", 
+		channel, config->channel_direction, config->block_count);
+
 	/* prepare first block for transfer ...*/
-	SDMA_PrepareTransfer(&chan_data->transfer_cfg,
-			     block_cfg->source_address,
-			     block_cfg->dest_address,
-			     config->source_data_size, config->dest_data_size,
-			     /* watermark = */64,
-			     block_cfg->block_size, chan_data->event_source,
-			     chan_data->peripheral, chan_data->transfer_cfg.type);
+	// SDMA_PrepareTransfer(&chan_data->transfer_cfg,
+	// 		     block_cfg->source_address,
+	// 		     block_cfg->dest_address,
+	// 		     config->source_data_size, config->dest_data_size,
+	// 		     /* watermark = */64,
+	// 		     block_cfg->block_size, chan_data->event_source,
+	// 		     chan_data->peripheral, chan_data->transfer_cfg.type);
 
 	/*... and submit it to SDMA engine.
 	 * Note that SDMA transfer is later manually started by the dma_nxp_sdma_start()
 	 */
 	chan_data->transfer_cfg.isEventIgnore = false;
 	chan_data->transfer_cfg.isSoftTriggerIgnore = false;
-	SDMA_SubmitTransfer(&chan_data->handle, &chan_data->transfer_cfg);
+	//SDMA_SubmitTransfer(&chan_data->handle, &chan_data->transfer_cfg);
 
 	return 0;
 }
 
+/* Modify start function to simulate DMA start */
 static int dma_nxp_sdma_start(const struct device *dev, uint32_t channel)
 {
-	const struct sdma_dev_cfg *dev_cfg = dev->config;
 	struct sdma_dev_data *dev_data = dev->data;
 	struct sdma_channel_data *chan_data;
 
@@ -349,14 +374,18 @@ static int dma_nxp_sdma_start(const struct device *dev, uint32_t channel)
 
 	chan_data = &dev_data->chan[channel];
 
-	SDMA_SetChannelPriority(dev_cfg->base, channel, DMA_NXP_SDMA_CHAN_DEFAULT_PRIO);
-	SDMA_StartChannelSoftware(dev_cfg->base, channel);
+	LOG_INF("DMA START: Channel %d, Capacity %d bytes", channel, chan_data->capacity);
+	
+	/* Instead of starting hardware, simulate immediate completion */
+	/* Or use a timer for async simulation */
+	dma_nxp_sdma_callback(NULL, chan_data, true, 0);
 
 	return 0;
 }
 
 static int dma_nxp_sdma_stop(const struct device *dev, uint32_t channel)
 {
+	ZDLOG(DNSST);
 	struct sdma_dev_data *dev_data = dev->data;
 	struct sdma_channel_data *chan_data;
 
@@ -374,6 +403,7 @@ static int dma_nxp_sdma_stop(const struct device *dev, uint32_t channel)
 static int dma_nxp_sdma_get_status(const struct device *dev, uint32_t channel,
 				   struct dma_status *stat)
 {
+	ZDLOG(DNSGS);
 	struct sdma_dev_data *dev_data = dev->data;
 	struct sdma_channel_data *chan_data;
 	unsigned int key;
@@ -385,12 +415,16 @@ static int dma_nxp_sdma_get_status(const struct device *dev, uint32_t channel,
 	stat->pending_length = chan_data->stat.pending_length;
 	irq_unlock(key);
 
+	LOG_INF("Ch%d get_status: pending=%u, free=%u",
+		channel, stat->pending_length, stat->free);
+
 	return 0;
 }
 
 static int dma_nxp_sdma_reload(const struct device *dev, uint32_t channel, uint32_t src,
 			       uint32_t dst, size_t size)
 {
+	ZDLOG(DNSR);
 	struct sdma_dev_data *dev_data = dev->data;
 	struct sdma_channel_data *chan_data;
 	unsigned int key;
@@ -404,8 +438,18 @@ static int dma_nxp_sdma_reload(const struct device *dev, uint32_t channel, uint3
 	key = irq_lock();
 	if (chan_data->direction == MEMORY_TO_PERIPHERAL) {
 		dma_nxp_sdma_produce(chan_data, size);
+
+		LOG_INF("Ch%d reload produce: size=%zu -> pending=%u, free=%u",
+			channel, size,
+			chan_data->stat.pending_length,
+			chan_data->stat.free);
 	} else {
 		dma_nxp_sdma_consume(chan_data, size);
+
+		LOG_INF("Ch%d reload consume: size=%zu -> pending=%u, free=%u",
+			channel, size,
+			chan_data->stat.pending_length,
+			chan_data->stat.free);
 	}
 	irq_unlock(key);
 
@@ -414,6 +458,7 @@ static int dma_nxp_sdma_reload(const struct device *dev, uint32_t channel, uint3
 
 static int dma_nxp_sdma_get_attribute(const struct device *dev, uint32_t type, uint32_t *val)
 {
+	ZDLOG(DNSGA);
 	switch (type) {
 	case DMA_ATTR_BUFFER_SIZE_ALIGNMENT:
 		*val = 4;
@@ -433,6 +478,7 @@ static int dma_nxp_sdma_get_attribute(const struct device *dev, uint32_t type, u
 
 static bool sdma_channel_filter(const struct device *dev, int chan_id, void *param)
 {
+	ZDLOG(DSCF);
 	struct sdma_dev_data *dev_data = dev->data;
 
 	/* chan 0 is reserved for boot channel */
@@ -465,6 +511,7 @@ static DEVICE_API(dma, sdma_api) = {
 
 static int dma_nxp_sdma_init(const struct device *dev)
 {
+	ZDLOG(DNSIN);
 	struct sdma_dev_data *data = dev->data;
 	const struct sdma_dev_cfg *cfg = dev->config;
 	sdma_config_t defconfig;
